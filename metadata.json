@@ -1,0 +1,6 @@
+{
+  "name": "GPay Crypto Withdrawal Wallet",
+  "description": "Custom Crypto/INR Wallet Withdrawal Application with Telegram Bot integration.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
