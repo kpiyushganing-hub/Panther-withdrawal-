@@ -197,10 +197,21 @@ export default function Home() {
             </div>
             
             <div className="flex items-center space-x-3 bg-gray-100 px-3 py-1.5 rounded-full">
+              {user?.isAdmin && (
+                <button 
+                  onClick={() => {
+                    localStorage.setItem('adminToken', token);
+                    window.location.href = '/admin/dashboard';
+                  }}
+                  className="bg-purple-100 text-purple-700 text-xs font-bold px-2 py-1 rounded-full mr-1 hover:bg-purple-200 transition-colors"
+                >
+                  Admin
+                </button>
+              )}
               <div className="w-8 h-8 rounded-full bg-blue-200 flex items-center justify-center text-blue-700 font-bold">
                 {user?.firstName?.[0] || 'U'}
               </div>
-              <div className="text-sm">
+              <div className="text-sm hidden sm:block">
                 <div className="font-medium leading-none">{user?.firstName}</div>
                 <div className="text-xs text-gray-500">ID: {user?.telegramId}</div>
               </div>

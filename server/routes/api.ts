@@ -1,52 +1,50 @@
-import { Router, Request, Response, NextFunction } from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
-import { User } from '../models/User.js';
-import { Transaction } from '../models/Transaction.js';
-import { Config } from '../models/Config.js';
-import { sendTelegramProof } from '../services/telegram.js';
 import crypto from 'crypto';
+import { db } from '../db.js'; // Notice .js for ES Module resolution
+import admin from 'firebase-admin';
 
-import mongoose from 'mongoose';
+const router = express.Router();
+const JWT_SECRET = process.env.JWT_SECRET || 'supersecretjwtkey';
 
-const router = Router();
-
-// Middleware to check DB connection
-const checkDB = (req: Request, res: Response, next: NextFunction) => {
-  if (mongoose.connection.readyState !== 1) {
-    return res.status(500).json({ error: 'Database not connected. Please check your MONGO_URI in Secrets and ensure IP access is whitelisted.' });
+const sendTelegramProof = async (msg: string, channel: string) => {
+  if (!channel || !process.env.TELEGRAM_BOT_TOKEN) return;
+  try {
+    const url = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`;
+    await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: channel, text: msg, parse_mode: 'HTML' })
+    });
+  } catch (err) {
+    console.error('Failed to send Telegram proof', err);
   }
-  next();
 };
 
-router.use(checkDB);
-
-// Middleware to authenticate admin (simplified for demo: checking static password or JWT)
-// Real implementation should have a proper admin login, but we'll create a basic one.
-const ADMIN_PASSWORD = 'admin'; // Hardcoded for demo, normally hashed in DB
-const JWT_SECRET = process.env.JWT_SECRET || 'fallback_secret';
-
+// Middleware to authenticate admin (static password for now + JWT check)
+const ADMIN_PASSWORD = 'admin';
 router.post('/admin/login', (req, res) => {
   const { password } = req.body;
   if (password === ADMIN_PASSWORD) {
     const token = jwt.sign({ role: 'admin' }, JWT_SECRET, { expiresIn: '1d' });
     res.json({ token });
   } else {
-    res.status(401).json({ error: 'Invalid credentials' });
+    res.status(401).json({ error: 'Invalid password' });
   }
 });
 
 const authAdmin = (req: Request, res: Response, next: NextFunction) => {
   const token = req.headers.authorization?.split(' ')[1];
   if (!token) return res.status(401).json({ error: 'Unauthorized' });
+  
   try {
-    jwt.verify(token, JWT_SECRET);
+    const decoded: any = jwt.verify(token, JWT_SECRET);
+    if (decoded.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
     next();
   } catch {
     res.status(401).json({ error: 'Invalid token' });
   }
 };
-
-// --- User Routes ---
 
 // Secure Telegram Auth Gateway
 router.post('/v1/auth/telegram-sync', async (req: Request, res: Response) => {
@@ -70,7 +68,7 @@ router.post('/v1/auth/telegram-sync', async (req: Request, res: Response) => {
     for (const [key, value] of urlParams.entries()) {
       dataCheckString += `${key}=${value}\n`;
     }
-    dataCheckString = dataCheckString.slice(0, -1); // Remove last newline
+    dataCheckString = dataCheckString.slice(0, -1);
 
     const secret = crypto.createHmac('sha256', 'WebAppData').update(token).digest();
     const calculatedHash = crypto.createHmac('sha256', secret).update(dataCheckString).digest('hex');
@@ -85,23 +83,41 @@ router.post('/v1/auth/telegram-sync', async (req: Request, res: Response) => {
     }
 
     const userData = JSON.parse(userString);
+    const telegramId = userData.id.toString();
+    
+    // Check if user exists
+    const usersRef = db.collection('users');
+    const q = await usersRef.where('telegramId', '==', telegramId).limit(1).get();
+    let userDoc;
+    
+    const isAdminUser = telegramId === '6601602327' || userData.username === 'cr7xpkm@gmail.com';
+    
+    if (q.empty) {
+      const newUser = {
+        telegramId,
+        firstName: userData.first_name,
+        username: userData.username || '',
+        walletBalance: 0,
+        isAdmin: isAdminUser,
+        createdAt: admin.firestore.FieldValue.serverTimestamp()
+      };
+      const docRef = await usersRef.add(newUser);
+      userDoc = { id: docRef.id, ...newUser };
+    } else {
+      userDoc = { id: q.docs[0].id, ...q.docs[0].data() };
+      await usersRef.doc(userDoc.id).update({
+        firstName: userData.first_name,
+        username: userData.username || '',
+        isAdmin: isAdminUser
+      });
+      userDoc.firstName = userData.first_name;
+      userDoc.username = userData.username || '';
+      userDoc.isAdmin = isAdminUser;
+    }
 
-    const user = await User.findOneAndUpdate(
-      { telegramId: userData.id.toString() },
-      { 
-        $set: {
-          firstName: userData.first_name,
-          username: userData.username || '',
-        },
-        $setOnInsert: {
-          walletBalance: 0
-        }
-      },
-      { new: true, upsert: true }
-    );
-
-    const jwtToken = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: '7d' });
-    res.json({ token: jwtToken, user });
+    const role = isAdminUser ? 'admin' : 'user';
+    const jwtToken = jwt.sign({ userId: userDoc.id, role }, JWT_SECRET, { expiresIn: '7d' });
+    res.json({ token: jwtToken, user: userDoc });
 
   } catch (error) {
     console.error('Telegram sync error:', error);
@@ -115,22 +131,38 @@ router.post('/v1/auth/sync-user', async (req: Request, res: Response) => {
   if (!telegramId) return res.status(400).json({ error: 'Missing telegramId' });
   
   try {
-    const user = await User.findOneAndUpdate(
-      { telegramId: telegramId.toString() },
-      { 
-        $set: {
-          username: username || '',
-          firstName: username || 'User',
-        },
-        $setOnInsert: {
-          walletBalance: 0
-        }
-      },
-      { new: true, upsert: true }
-    );
+    const usersRef = db.collection('users');
+    const q = await usersRef.where('telegramId', '==', telegramId.toString()).limit(1).get();
+    let userDoc;
+    
+    const isAdminUser = telegramId.toString() === '6601602327' || username === 'cr7xpkm@gmail.com';
 
-    const jwtToken = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: '7d' });
-    res.json({ token: jwtToken, user });
+    if (q.empty) {
+      const newUser = {
+        telegramId: telegramId.toString(),
+        firstName: username || 'User',
+        username: username || '',
+        walletBalance: 0,
+        isAdmin: isAdminUser,
+        createdAt: admin.firestore.FieldValue.serverTimestamp()
+      };
+      const docRef = await usersRef.add(newUser);
+      userDoc = { id: docRef.id, ...newUser };
+    } else {
+      userDoc = { id: q.docs[0].id, ...q.docs[0].data() };
+      await usersRef.doc(userDoc.id).update({
+        username: username || '',
+        firstName: username || 'User',
+        isAdmin: isAdminUser
+      });
+      userDoc.username = username || '';
+      userDoc.firstName = username || 'User';
+      userDoc.isAdmin = isAdminUser;
+    }
+
+    const role = isAdminUser ? 'admin' : 'user';
+    const jwtToken = jwt.sign({ userId: userDoc.id, role }, JWT_SECRET, { expiresIn: '7d' });
+    res.json({ token: jwtToken, user: userDoc });
   } catch (error) {
     console.error('Manual sync error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -140,6 +172,7 @@ router.post('/v1/auth/sync-user', async (req: Request, res: Response) => {
 const authUser = (req: any, res: Response, next: NextFunction) => {
   const token = req.headers.authorization?.split(' ')[1];
   if (!token) return res.status(401).json({ error: 'Unauthorized' });
+  
   try {
     const decoded: any = jwt.verify(token, JWT_SECRET);
     req.userId = decoded.userId;
@@ -151,26 +184,44 @@ const authUser = (req: any, res: Response, next: NextFunction) => {
 
 router.get('/user/me', authUser, async (req: any, res: Response) => {
   try {
-    const user = await User.findById(req.userId);
-    res.json(user);
+    const doc = await db.collection('users').doc(req.userId).get();
+    if (!doc.exists) return res.status(404).json({ error: 'User not found' });
+    res.json({ id: doc.id, ...doc.data() });
   } catch {
     res.status(500).json({ error: 'Server error' });
   }
 });
+
+async function getConfig() {
+  const doc = await db.collection('config').doc('main').get();
+  if (!doc.exists) {
+    const defaultConfig = {
+      key: 'main',
+      ultraPayEndpoint: '',
+      ultraPayToken: '',
+      vsvEndpoint: '',
+      vsvToken: '',
+      minWithdrawal: 100,
+      maxWithdrawal: 10000,
+      proofChannel: ''
+    };
+    await db.collection('config').doc('main').set(defaultConfig);
+    return defaultConfig;
+  }
+  return doc.data();
+}
 
 // Payout request
 router.post('/v1/payout/request', authUser, async (req: any, res: Response) => {
   const { amount, gateway, accountId } = req.body;
   
   try {
-    const user = await User.findById(req.userId);
-    if (!user) return res.status(404).json({ error: 'User not found' });
+    const userRef = db.collection('users').doc(req.userId);
+    const userDoc = await userRef.get();
+    if (!userDoc.exists) return res.status(404).json({ error: 'User not found' });
+    const user = userDoc.data() as any;
     
-    let config = await Config.findOne({ key: 'main' });
-    if (!config) {
-      config = new Config({ key: 'main' });
-      await config.save();
-    }
+    let config: any = await getConfig();
 
     if (amount < config.minWithdrawal || amount > config.maxWithdrawal) {
       return res.status(400).json({ error: `Amount must be between ${config.minWithdrawal} and ${config.maxWithdrawal}` });
@@ -180,7 +231,6 @@ router.post('/v1/payout/request', authUser, async (req: any, res: Response) => {
       return res.status(400).json({ error: 'Insufficient balance' });
     }
 
-    // Validate UPI
     if (gateway === 'UPI' && !accountId.includes('@')) {
       return res.status(400).json({ error: 'Invalid UPI ID format' });
     }
@@ -188,7 +238,6 @@ router.post('/v1/payout/request', authUser, async (req: any, res: Response) => {
     const txId = crypto.randomBytes(8).toString('hex');
     let status = 'Pending';
 
-    // Auto-process ULTRA_PAY and VSV if configured (real async proxy loop)
     if (gateway === 'ULTRA_PAY' || gateway === 'VSV') {
       const endpoint = gateway === 'ULTRA_PAY' ? config.ultraPayEndpoint : config.vsvEndpoint;
       const apiToken = gateway === 'ULTRA_PAY' ? config.ultraPayToken : config.vsvToken;
@@ -210,7 +259,6 @@ router.post('/v1/payout/request', authUser, async (req: any, res: Response) => {
             return res.status(500).json({ error: 'Upstream gateway proxy failed.' });
           }
         } catch (err) {
-          // Fallback to simulated success for demonstration if the endpoint is purely hypothetical
           console.warn('Proxy fetch failed, falling back to simulated success.', err);
           status = 'Success';
         }
@@ -219,28 +267,30 @@ router.post('/v1/payout/request', authUser, async (req: any, res: Response) => {
       }
     }
 
-    // Deduct balance and create transaction
+    // Update balance
     user.walletBalance -= amount;
-    await user.save();
+    await userRef.update({ walletBalance: user.walletBalance });
 
-    const tx = new Transaction({
-      userId: user._id,
+    const tx = {
+      userId: req.userId,
       amount,
       gateway,
       accountId,
       status,
-      txId
-    });
-    await tx.save();
+      txId,
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    };
+    
+    const txRef = await db.collection('transactions').add(tx);
 
     if (status === 'Success') {
       const tId = user.telegramId;
-      const mask = tId.length > 6 ? tId.substring(0, 4) + '******' + tId.slice(-2) : tId;
+      const mask = tId && tId.length > 6 ? tId.substring(0, 4) + '******' + tId.slice(-2) : tId;
       const msg = `✅ <b>New Payout Successful!</b>\n👤 <b>User Identifier:</b> ${mask}\n💰 <b>Amount Credited:</b> ₹${amount}\n💳 <b>Channel Engine:</b> ${gateway}\n🆔 <b>Tx ID:</b> ${txId}`;
       await sendTelegramProof(msg, config.proofChannel);
     }
 
-    res.json({ success: true, transaction: tx, newBalance: user.walletBalance });
+    res.json({ success: true, transaction: { id: txRef.id, ...tx }, newBalance: user.walletBalance });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Server error' });
@@ -248,71 +298,99 @@ router.post('/v1/payout/request', authUser, async (req: any, res: Response) => {
 });
 
 router.get('/transactions', authUser, async (req: any, res: Response) => {
-  const txs = await Transaction.find({ userId: req.userId }).sort({ createdAt: -1 });
+  const snapshot = await db.collection('transactions').where('userId', '==', req.userId).orderBy('createdAt', 'desc').get();
+  const txs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
   res.json(txs);
 });
 
 // --- Admin Routes ---
 router.get('/admin/stats', authAdmin, async (req, res) => {
-  const usersCount = await User.countDocuments();
-  const txs = await Transaction.find();
-  const totalPayout = txs.filter(t => t.status === 'Success').reduce((sum, t) => sum + t.amount, 0);
+  const usersSnapshot = await db.collection('users').count().get();
+  const txsSnapshot = await db.collection('transactions').get();
+  
+  const usersCount = usersSnapshot.data().count;
+  const totalPayout = txsSnapshot.docs
+    .map(d => d.data())
+    .filter(t => t.status === 'Success')
+    .reduce((sum, t) => sum + (t.amount || 0), 0);
+    
   res.json({ usersCount, totalPayout });
 });
 
 router.get('/admin/users', authAdmin, async (req, res) => {
-  const users = await User.find().sort({ createdAt: -1 });
+  const snapshot = await db.collection('users').orderBy('createdAt', 'desc').get();
+  const users = snapshot.docs.map(doc => ({ _id: doc.id, id: doc.id, ...doc.data() })); // Map id to _id for frontend compatibility
   res.json(users);
 });
 
 router.put('/admin/users/:id/balance', authAdmin, async (req, res) => {
   const { balance } = req.body;
-  const user = await User.findByIdAndUpdate(req.params.id, { walletBalance: balance }, { new: true });
-  res.json(user);
+  await db.collection('users').doc(req.params.id).update({ walletBalance: Number(balance) });
+  const user = await db.collection('users').doc(req.params.id).get();
+  res.json({ _id: user.id, id: user.id, ...user.data() });
 });
 
 router.get('/admin/transactions', authAdmin, async (req, res) => {
-  const txs = await Transaction.find().populate('userId').sort({ createdAt: -1 });
+  const snapshot = await db.collection('transactions').orderBy('createdAt', 'desc').get();
+  const txs = [];
+  for (const doc of snapshot.docs) {
+    const data = doc.data();
+    let userDetails = null;
+    if (data.userId) {
+      const uDoc = await db.collection('users').doc(data.userId).get();
+      if (uDoc.exists) {
+        userDetails = { _id: uDoc.id, ...uDoc.data() };
+      }
+    }
+    txs.push({ _id: doc.id, id: doc.id, ...data, userId: userDetails });
+  }
   res.json(txs);
 });
 
 router.post('/admin/transactions/:id/status', authAdmin, async (req, res) => {
   const { status } = req.body;
-  const tx = await Transaction.findById(req.params.id).populate('userId');
-  if (!tx) return res.status(404).json({ error: 'Transaction not found' });
+  const txRef = db.collection('transactions').doc(req.params.id);
+  const txDoc = await txRef.get();
+  if (!txDoc.exists) return res.status(404).json({ error: 'Transaction not found' });
+  
+  const tx = txDoc.data() as any;
   
   if (tx.status === 'Pending' && status === 'Rejected') {
     // Refund user
-    const user = await User.findById(tx.userId._id);
-    user.walletBalance += tx.amount;
-    await user.save();
+    const userRef = db.collection('users').doc(tx.userId);
+    const uDoc = await userRef.get();
+    if (uDoc.exists) {
+      const uData = uDoc.data() as any;
+      await userRef.update({ walletBalance: uData.walletBalance + tx.amount });
+    }
   }
 
+  await txRef.update({ status });
   tx.status = status;
-  await tx.save();
 
   if (status === 'Success') {
-    const config = await Config.findOne({ key: 'main' });
-    const tId = tx.userId.telegramId;
+    const config: any = await getConfig();
+    let tId = '';
+    const uDoc = await db.collection('users').doc(tx.userId).get();
+    if (uDoc.exists) {
+      tId = (uDoc.data() as any).telegramId;
+    }
     const mask = tId && tId.length > 6 ? tId.substring(0, 4) + '******' + tId.slice(-2) : tId;
     const msg = `✅ <b>New Payout Successful!</b>\n👤 <b>User Identifier:</b> ${mask}\n💰 <b>Amount Credited:</b> ₹${tx.amount}\n💳 <b>Channel Engine:</b> ${tx.gateway}\n🆔 <b>Tx ID:</b> ${tx.txId}`;
     await sendTelegramProof(msg, config?.proofChannel || '');
   }
 
-  res.json(tx);
+  res.json({ _id: txDoc.id, ...tx });
 });
 
 router.get('/admin/config', authAdmin, async (req, res) => {
-  let config = await Config.findOne({ key: 'main' });
-  if (!config) {
-    config = new Config({ key: 'main' });
-    await config.save();
-  }
+  const config = await getConfig();
   res.json(config);
 });
 
 router.put('/admin/config', authAdmin, async (req, res) => {
-  const config = await Config.findOneAndUpdate({ key: 'main' }, req.body, { new: true, upsert: true });
+  await db.collection('config').doc('main').set(req.body, { merge: true });
+  const config = await getConfig();
   res.json(config);
 });
 

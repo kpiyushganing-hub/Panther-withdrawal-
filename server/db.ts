@@ -1,18 +1,13 @@
-import mongoose from 'mongoose';
+import admin from 'firebase-admin';
 
-export async function connectDB() {
-  const uri = process.env.MONGO_URI;
-  if (!uri || uri.includes('...')) {
-    console.warn('Real MONGO_URI is not defined. Please configure it in your Secrets.');
-    return;
-  }
-
-  try {
-    await mongoose.connect(uri, {
-      serverSelectionTimeoutMS: 5000,
-    });
-    console.log('MongoDB Connected');
-  } catch (error) {
-    console.warn('MongoDB connection warning: Could not connect to the database. Please ensure your IP is whitelisted in MongoDB Atlas or check your MONGO_URI.');
+try {
+  admin.initializeApp();
+  console.log('Firebase Admin initialized.');
+} catch (error: any) {
+  if (!/already exists/.test(error.message)) {
+    console.error('Firebase Admin initialization error:', error);
   }
 }
+
+export const db = admin.firestore();
+export const connectDB = async () => {}; // No-op for backwards compatibility with server.ts
