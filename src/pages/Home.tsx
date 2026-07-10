@@ -14,35 +14,67 @@ export default function Home() {
   const [user, setUser] = useState<any>(null);
   const [token, setToken] = useState<string>('');
   const [loading, setLoading] = useState(true);
+  const [accessDenied, setAccessDenied] = useState(false);
+  const [dbError, setDbError] = useState('');
   
   const [selectedGateway, setSelectedGateway] = useState<string | null>(null);
+
   const [accountId, setAccountId] = useState('');
   const [amount, setAmount] = useState('');
   const [withdrawing, setWithdrawing] = useState(false);
   const [message, setMessage] = useState({ type: '', text: '' });
 
   useEffect(() => {
-    // In a real Telegram WebApp, window.Telegram.WebApp.initDataUnsafe would be used.
-    // For demo, we auto-login with mock data
-    const login = async () => {
+    const initTelegram = async () => {
       try {
-        const res = await fetch('/api/auth/telegram', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ initData: MOCK_INIT_DATA })
-        });
-        const data = await res.json();
-        if (data.token) {
-          setToken(data.token);
-          setUser(data.user);
+        const tg = (window as any).Telegram?.WebApp;
+        if (tg) {
+          tg.ready();
+          tg.expand();
+          
+          const initDataUnsafe = tg.initDataUnsafe;
+          if (!initDataUnsafe || !initDataUnsafe.user) {
+            setAccessDenied(true);
+            setLoading(false);
+            return;
+          }
+
+          const res = await fetch('/api/v1/auth/telegram-sync', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ initData: tg.initData })
+          });
+          
+          const text = await res.text();
+          let data;
+          try {
+            data = JSON.parse(text);
+          } catch (e) {
+            throw new Error('Non-JSON response from server: ' + text.substring(0, 50));
+          }
+          
+          if (res.status === 500) {
+            setDbError(data.error);
+          } else if (res.status === 401) {
+            setAccessDenied(true);
+          } else if (data.token) {
+            setToken(data.token);
+            setUser(data.user);
+          } else {
+             setAccessDenied(true);
+          }
+        } else {
+           // Not in Telegram environment
+           setAccessDenied(true);
         }
       } catch (err) {
         console.error('Login error', err);
+        setAccessDenied(true);
       } finally {
         setLoading(false);
       }
     };
-    login();
+    initTelegram();
   }, []);
 
   const handleWithdraw = async (e: React.FormEvent) => {
@@ -83,6 +115,30 @@ export default function Home() {
 
   if (loading) return <div className="flex items-center justify-center min-h-screen"><Loader2 className="w-8 h-8 animate-spin text-blue-600" /></div>;
 
+  if (accessDenied) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4 font-sans text-gray-900">
+        <div className="bg-white p-8 rounded-3xl max-w-sm w-full text-center shadow-lg border border-gray-100">
+          <AlertCircle className="w-16 h-16 mx-auto mb-6 text-red-500" />
+          <h2 className="text-2xl font-bold mb-3 text-gray-800">⚠️ Access Denied</h2>
+          <p className="text-gray-600 font-medium leading-relaxed">Please open this web wallet application strictly inside the official Telegram Bot interface.</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (dbError) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
+        <div className="bg-red-50 text-red-600 p-6 rounded-2xl max-w-md w-full border border-red-200 text-center shadow-lg">
+          <AlertCircle className="w-12 h-12 mx-auto mb-4 text-red-500" />
+          <h2 className="text-xl font-bold mb-2">Database Connection Failed</h2>
+          <p className="text-sm font-medium">{dbError}</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-gray-50 font-sans text-gray-900 pb-20">
       {/* Header - Gmail Pay Style */}
@@ -97,7 +153,9 @@ export default function Home() {
             </div>
             
             <div className="flex items-center space-x-3 bg-gray-100 px-3 py-1.5 rounded-full">
-              <img src={MOCK_INIT_DATA.photo_url} alt="avatar" className="w-6 h-6 rounded-full" />
+              <div className="w-8 h-8 rounded-full bg-blue-200 flex items-center justify-center text-blue-700 font-bold">
+                {user?.firstName?.[0] || 'U'}
+              </div>
               <div className="text-sm">
                 <div className="font-medium leading-none">{user?.firstName}</div>
                 <div className="text-xs text-gray-500">ID: {user?.telegramId}</div>
@@ -107,7 +165,7 @@ export default function Home() {
 
           <div className="text-center bg-blue-600 text-white rounded-2xl p-6 shadow-lg shadow-blue-200">
             <p className="text-blue-100 text-sm font-medium mb-1">Available Balance</p>
-            <h1 className="text-4xl font-bold tracking-tight">₹{user?.balance?.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</h1>
+            <h1 className="text-4xl font-bold tracking-tight">₹{(user?.walletBalance || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</h1>
           </div>
         </div>
       </header>
@@ -205,7 +263,7 @@ export default function Home() {
                     type="number"
                     required
                     min="1"
-                    max={user?.balance}
+                    max={user?.walletBalance}
                     step="any"
                     value={amount}
                     onChange={e => setAmount(e.target.value)}
@@ -213,7 +271,7 @@ export default function Home() {
                     className="w-full pl-8 pr-4 py-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all bg-gray-50 text-gray-900 font-semibold text-lg"
                   />
                 </div>
-                <p className="text-xs text-gray-500 mt-2 text-right">Available: ₹{user?.balance}</p>
+                <p className="text-xs text-gray-500 mt-2 text-right">Available: ₹{user?.walletBalance}</p>
               </div>
 
               {message.text && (

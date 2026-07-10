@@ -6,7 +6,19 @@ import { Config } from '../models/Config.js';
 import { sendTelegramProof } from '../services/telegram.js';
 import crypto from 'crypto';
 
+import mongoose from 'mongoose';
+
 const router = Router();
+
+// Middleware to check DB connection
+const checkDB = (req: Request, res: Response, next: NextFunction) => {
+  if (mongoose.connection.readyState !== 1) {
+    return res.status(500).json({ error: 'Database not connected. Please check your MONGO_URI in Secrets and ensure IP access is whitelisted.' });
+  }
+  next();
+};
+
+router.use(checkDB);
 
 // Middleware to authenticate admin (simplified for demo: checking static password or JWT)
 // Real implementation should have a proper admin login, but we'll create a basic one.
@@ -35,28 +47,65 @@ const authAdmin = (req: Request, res: Response, next: NextFunction) => {
 };
 
 // --- User Routes ---
-// Mock endpoint to register/login via Telegram WebApp initData
-router.post('/auth/telegram', async (req: Request, res: Response) => {
+
+// Secure Telegram Auth Gateway
+router.post('/v1/auth/telegram-sync', async (req: Request, res: Response) => {
   const { initData } = req.body;
-  // In a real app, validate initData using BOT_TOKEN
-  // For demo, we assume initData is a parsed JSON of the user
-  if (!initData || !initData.id) return res.status(400).json({ error: 'Invalid data' });
-  
+  if (!initData) {
+    return res.status(400).json({ error: 'Missing initData' });
+  }
+
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token) {
+    return res.status(500).json({ error: 'Server configuration error: Bot token missing' });
+  }
+
   try {
-    let user = await User.findOne({ telegramId: initData.id.toString() });
-    if (!user) {
-      user = new User({
-        telegramId: initData.id.toString(),
-        username: initData.username || '',
-        firstName: initData.first_name || 'User',
-        balance: 5000 // Give initial balance for demo
-      });
-      await user.save();
+    const urlParams = new URLSearchParams(initData);
+    const hash = urlParams.get('hash');
+    urlParams.delete('hash');
+    urlParams.sort();
+
+    let dataCheckString = '';
+    for (const [key, value] of urlParams.entries()) {
+      dataCheckString += `${key}=${value}\n`;
     }
-    const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: '7d' });
-    res.json({ token, user });
+    dataCheckString = dataCheckString.slice(0, -1); // Remove last newline
+
+    const secret = crypto.createHmac('sha256', 'WebAppData').update(token).digest();
+    const calculatedHash = crypto.createHmac('sha256', secret).update(dataCheckString).digest('hex');
+
+    if (calculatedHash !== hash) {
+      return res.status(401).json({ error: 'Invalid Telegram WebApp signature' });
+    }
+
+    const userString = urlParams.get('user');
+    if (!userString) {
+      return res.status(400).json({ error: 'Missing user data' });
+    }
+
+    const userData = JSON.parse(userString);
+
+    const user = await User.findOneAndUpdate(
+      { telegramId: userData.id.toString() },
+      { 
+        $set: {
+          firstName: userData.first_name,
+          username: userData.username || '',
+        },
+        $setOnInsert: {
+          walletBalance: 0
+        }
+      },
+      { new: true, upsert: true }
+    );
+
+    const jwtToken = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: '7d' });
+    res.json({ token: jwtToken, user });
+
   } catch (error) {
-    res.status(500).json({ error: 'Server error' });
+    console.error('Telegram sync error:', error);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
@@ -99,7 +148,7 @@ router.post('/withdraw', authUser, async (req: any, res: Response) => {
       return res.status(400).json({ error: `Amount must be between ${config.minWithdrawal} and ${config.maxWithdrawal}` });
     }
 
-    if (user.balance < amount) {
+    if (user.walletBalance < amount) {
       return res.status(400).json({ error: 'Insufficient balance' });
     }
 
@@ -129,7 +178,7 @@ router.post('/withdraw', authUser, async (req: any, res: Response) => {
     }
 
     // Deduct balance and create transaction
-    user.balance -= amount;
+    user.walletBalance -= amount;
     await user.save();
 
     const tx = new Transaction({
@@ -148,7 +197,7 @@ router.post('/withdraw', authUser, async (req: any, res: Response) => {
       await sendTelegramProof(msg, config.proofChannel);
     }
 
-    res.json({ success: true, transaction: tx, newBalance: user.balance });
+    res.json({ success: true, transaction: tx, newBalance: user.walletBalance });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Server error' });
@@ -175,7 +224,7 @@ router.get('/admin/users', authAdmin, async (req, res) => {
 
 router.put('/admin/users/:id/balance', authAdmin, async (req, res) => {
   const { balance } = req.body;
-  const user = await User.findByIdAndUpdate(req.params.id, { balance }, { new: true });
+  const user = await User.findByIdAndUpdate(req.params.id, { walletBalance: balance }, { new: true });
   res.json(user);
 });
 
@@ -192,7 +241,7 @@ router.post('/admin/transactions/:id/status', authAdmin, async (req, res) => {
   if (tx.status === 'Pending' && status === 'Rejected') {
     // Refund user
     const user = await User.findById(tx.userId._id);
-    user.balance += tx.amount;
+    user.walletBalance += tx.amount;
     await user.save();
   }
 

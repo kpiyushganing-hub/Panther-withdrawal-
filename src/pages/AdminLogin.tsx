@@ -19,7 +19,13 @@ export default function AdminLogin() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ password })
       });
-      const data = await res.json();
+      const text = await res.text();
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch (e) {
+        throw new Error('Server returned HTML or invalid JSON');
+      }
       
       if (res.ok) {
         localStorage.setItem('adminToken', data.token);

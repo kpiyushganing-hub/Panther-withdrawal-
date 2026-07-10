@@ -16,6 +16,8 @@ export default function AdminDashboard() {
   const [editingBalance, setEditingBalance] = useState<{id: string, amount: string} | null>(null);
   const [savingConfig, setSavingConfig] = useState(false);
 
+  const [dbError, setDbError] = useState('');
+
   useEffect(() => {
     const savedToken = localStorage.getItem('adminToken');
     if (!savedToken) {
@@ -36,15 +38,36 @@ export default function AdminDashboard() {
         fetch('/api/admin/config', { headers })
       ]);
       
+      const uText = await uRes.text();
+      let uData, tData, cData;
+      try {
+        uData = JSON.parse(uText);
+        tData = await tRes.json();
+        cData = await cRes.json();
+      } catch (e) {
+        if (uRes.status === 500) {
+          setDbError('Database not connected. Please check your MONGO_URI in Secrets and ensure IP access is whitelisted.');
+        } else {
+          console.error('Invalid JSON response');
+        }
+        setLoading(false);
+        return;
+      }
+      
+      if (uRes.status === 500) {
+        setDbError(uData.error || 'Database connection error');
+        return;
+      }
+      
       if (uRes.status === 401) {
         localStorage.removeItem('adminToken');
         navigate('/admin');
         return;
       }
 
-      setUsers(await uRes.json());
-      setTransactions(await tRes.json());
-      setConfig(await cRes.json());
+      setUsers(uData);
+      setTransactions(tData);
+      setConfig(cData);
     } catch (error) {
       console.error("Failed to fetch admin data", error);
     } finally {
@@ -105,6 +128,17 @@ export default function AdminDashboard() {
   };
 
   if (loading) return <div className="min-h-screen flex items-center justify-center"><Loader2 className="w-8 h-8 animate-spin text-blue-600" /></div>;
+
+  if (dbError) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
+        <div className="bg-red-50 text-red-600 p-6 rounded-2xl max-w-md w-full border border-red-200 text-center shadow-lg">
+          <h2 className="text-xl font-bold mb-2">Database Connection Failed</h2>
+          <p className="text-sm font-medium">{dbError}</p>
+        </div>
+      </div>
+    );
+  }
 
   const pendingTxs = transactions.filter(t => t.status === 'Pending');
   const completedTxs = transactions.filter(t => t.status !== 'Pending');
