@@ -14,7 +14,10 @@ export default function Home() {
   const [user, setUser] = useState<any>(null);
   const [token, setToken] = useState<string>('');
   const [loading, setLoading] = useState(true);
-  const [accessDenied, setAccessDenied] = useState(false);
+  const [needsManualAuth, setNeedsManualAuth] = useState(false);
+  const [manualId, setManualId] = useState('');
+  const [manualUsername, setManualUsername] = useState('');
+  
   const [dbError, setDbError] = useState('');
   
   const [selectedGateway, setSelectedGateway] = useState<string | null>(null);
@@ -34,7 +37,7 @@ export default function Home() {
           
           const initDataUnsafe = tg.initDataUnsafe;
           if (!initDataUnsafe || !initDataUnsafe.user) {
-            setAccessDenied(true);
+            setNeedsManualAuth(true);
             setLoading(false);
             return;
           }
@@ -56,20 +59,20 @@ export default function Home() {
           if (res.status === 500) {
             setDbError(data.error);
           } else if (res.status === 401) {
-            setAccessDenied(true);
+            setNeedsManualAuth(true);
           } else if (data.token) {
             setToken(data.token);
             setUser(data.user);
           } else {
-             setAccessDenied(true);
+             setNeedsManualAuth(true);
           }
         } else {
            // Not in Telegram environment
-           setAccessDenied(true);
+           setNeedsManualAuth(true);
         }
       } catch (err) {
         console.error('Login error', err);
-        setAccessDenied(true);
+        setNeedsManualAuth(true);
       } finally {
         setLoading(false);
       }
@@ -77,13 +80,37 @@ export default function Home() {
     initTelegram();
   }, []);
 
+  const handleManualAuth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    try {
+      const res = await fetch('/api/v1/auth/sync-user', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ telegramId: manualId, username: manualUsername })
+      });
+      const data = await res.json();
+      if (res.ok && data.token) {
+        setToken(data.token);
+        setUser(data.user);
+        setNeedsManualAuth(false);
+      } else {
+        alert(data.error || 'Failed to authenticate');
+      }
+    } catch (err) {
+      alert('Network error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleWithdraw = async (e: React.FormEvent) => {
     e.preventDefault();
     setWithdrawing(true);
     setMessage({ type: '', text: '' });
 
     try {
-      const res = await fetch('/api/withdraw', {
+      const res = await fetch('/api/v1/payout/request', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -115,14 +142,31 @@ export default function Home() {
 
   if (loading) return <div className="flex items-center justify-center min-h-screen"><Loader2 className="w-8 h-8 animate-spin text-blue-600" /></div>;
 
-  if (accessDenied) {
+  if (needsManualAuth) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4 font-sans text-gray-900">
-        <div className="bg-white p-8 rounded-3xl max-w-sm w-full text-center shadow-lg border border-gray-100">
-          <AlertCircle className="w-16 h-16 mx-auto mb-6 text-red-500" />
-          <h2 className="text-2xl font-bold mb-3 text-gray-800">⚠️ Access Denied</h2>
-          <p className="text-gray-600 font-medium leading-relaxed">Please open this web wallet application strictly inside the official Telegram Bot interface.</p>
-        </div>
+        <form onSubmit={handleManualAuth} className="bg-white p-8 rounded-3xl max-w-sm w-full shadow-lg border border-gray-100">
+          <div className="text-center mb-6">
+            <div className="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-4 text-blue-600">
+              <svg className="w-8 h-8" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-1-13h2v6h-2zm0 8h2v2h-2z"/></svg>
+            </div>
+            <h2 className="text-2xl font-bold text-gray-800">Manual Authentication</h2>
+            <p className="text-gray-500 text-sm mt-2">Please enter your Telegram credentials to sync your wallet profile.</p>
+          </div>
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Telegram User ID</label>
+              <input type="number" required value={manualId} onChange={e => setManualId(e.target.value)} className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none" placeholder="e.g. 6601602327" />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Telegram Username</label>
+              <input type="text" required value={manualUsername} onChange={e => setManualUsername(e.target.value)} className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none" placeholder="e.g. BlazeKingNpc" />
+            </div>
+            <button type="submit" className="w-full bg-blue-600 text-white font-bold py-3 rounded-xl shadow-md hover:bg-blue-700 transition-colors">
+              Sync Profile
+            </button>
+          </div>
+        </form>
       </div>
     );
   }
