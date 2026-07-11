@@ -13,7 +13,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 // Global configuration variables managed via Admin Panel
 let adminConfig = {
-    telegramBotToken: process.env.BOT_TOKEN || "8929895559:AAF4HlwMMgwTh4jhxiC7imrP3X5FKCZL2iA",
+    telegramBotToken: process.env.BOT_TOKEN || "8633681293:AAFyfFrKxpHBgWoXMlBo8b5bJhKnEJ0Vi70",
     paymentApiLink: "https://vsvpay.com", // Default gateway link
     allowedGateways: ["UPI", "ULTRA_PAY", "VSV", "COMING_SOON"] // Removed all other options
 };
