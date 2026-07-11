@@ -1,14 +1,80 @@
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>GPay Crypto Withdrawal Wallet</title>
-    <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
-  </body>
-</html>
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PANTHET WALLET BOT</title>
+    <!-- Telegram WebApp SDK Script (Auto-Detection ke liye zaroori hai) -->
+    <script src="https://telegram.org"></script>
+    <style>
+        body { background-color: #0d1117; color: #ffffff; font-family: Arial, sans-serif; text-align: center; margin: 0; padding: 20px; }
+        .card { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 20px; max-width: 400px; margin: auto; }
+        .balance { font-size: 28px; color: #58a6ff; font-weight: bold; margin: 15px 0; }
+        .btn { display: block; width: 100%; padding: 12px; margin: 10px 0; border: none; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; text-transform: uppercase; }
+        .btn-active { background-color: #238636; color: white; }
+        .btn-disabled { background-color: #21262d; color: #8b949e; cursor: not-allowed; }
+        .error { color: #f85149; margin: 10px 0; font-size: 14px; }
+    </style>
+</head>
+<body>
 
+    <div class="card">
+        <h2>PANTHET WALLET BOT</h2>
+        <p>User ID: <span id="userId">Auto Detecting...</span></p>
+        
+        <div class="balance">₹<span id="balance">0.00</span></div>
+        <div id="errorMessage" class="error"></div>
+
+        <!-- Strict Restricted Gateways -->
+        <button class="btn btn-active" onclick="processWithdraw('UPI')">UPI</button>
+        <button class="btn btn-active" onclick="processWithdraw('ULTRA PAY')">ULTRA PAY</button>
+        <button class="btn btn-active" onclick="processWithdraw('VSV')">VSV</button>
+        <button class="btn btn-disabled" disabled>COMINGSOON</button>
+    </div>
+
+    <script>
+        // Auto-detect Telegram WebApp Data
+        const tg = window.Telegram.WebApp;
+        tg.expand(); // Screen size auto-adjust
+
+        // Telegram initData se user ID extract karna
+        const urlParams = new URLSearchParams(tg.initData);
+        let userRaw = urlParams.get('user');
+        let userId = "";
+
+        if (userRaw) {
+            const userObj = JSON.parse(userRaw);
+            userId = userObj.id.toString(); // ID 6601602327 automatically fetch ho jayegi
+            document.getElementById('userId').innerText = userId;
+            fetchBalance(userId);
+        } else {
+            document.getElementById('errorMessage').innerText = "Network Error: Open inside Telegram Only!";
+        }
+
+        // Auto Balance Fetch Function
+        async function fetchBalance(uid) {
+            try {
+                const response = await fetch('/api/wallet/balance', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ userId: uid, token: tg.initData }) // Telegram unique secure token
+                });
+                const data = await response.json();
+                if(data.error) {
+                    document.getElementById('errorMessage').innerText = data.error;
+                } else {
+                    document.getElementById('balance').innerText = data.balance;
+                }
+            } catch (err) {
+                document.getElementById('errorMessage').innerText = "Backend se connection pack fail hua.";
+            }
+        }
+
+        // Withdrawal Action
+        function processWithdraw(gateway) {
+            alert(gateway + " withdrawal request processing for user: " + userId);
+            // Dynamic routing logic call yahan se hogi
+        }
+    </script>
+</body>
+</html>
